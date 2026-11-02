@@ -1,27 +1,18 @@
 import Phaser from 'phaser';
+import { BLOCKS, isSeed, blockOf, seedId, itemName, SEED_DROP_CHANCE, HARVEST_SEED_CHANCE } from './items.js';
+import { T, W, H, loadGame, saveGame } from './world.js';
+import { makeTextures } from './textures.js';
 
-const T = 32, W = 80, H = 50;
-const SAVE_KEY = 'growgame-world-v2';
-// nilai dunia: 0 kosong, 1 tanah, 2 batu, 3 rumput, 4 batuan dasar (tidak bisa dihancurkan)
-const BLOCKS = {
-  1: { name: 'Tanah', tex: 0, debris: '#8b5a2b' },
-  2: { name: 'Batu', tex: 1, debris: '#808080' },
-  3: { name: 'Rumput', tex: 2, debris: '#4caf50' },
-  4: { name: 'Dasar', tex: 3, debris: '#333333' },
-};
-const HOTBAR = [1, 2]; // blok yang bisa dipasang
-
-function rng(seed) {
-  let s = seed >>> 0;
-  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-}
+const MAX_SLOTS = 8;
 
 class GameScene extends Phaser.Scene {
   create() {
-    this.makeTextures();
-    this.world = this.loadWorld();
-    this.inv = { 1: 0, 2: 0, 3: 0, 4: 0 };
-    this.sel = 1;
+    makeTextures(this);
+    const save = loadGame();
+    this.world = save.world;
+    this.trees = save.trees;   // { "x,y": { b: idBlok, t: waktuTanam(ms) } }
+    this.inv = save.inv;       // { idItem: jumlah }
+    this.sel = null;
     this.keys = { left: false, right: false, jump: false };
     this.facing = 1;
 
@@ -30,13 +21,18 @@ class GameScene extends Phaser.Scene {
     this.clouds = this.add.tileSprite(0, 0, 800, 150, 'clouds').setOrigin(0).setScrollFactor(0).setDepth(-9);
     this.hills = this.add.tileSprite(0, 0, 800, 200, 'hills').setOrigin(0).setScrollFactor(0).setDepth(-8);
 
-    // dunia (tilemap)
+    // dunia
     const data = this.world.map((r) => r.map((v) => (v ? BLOCKS[v].tex : -1)));
     this.map = this.make.tilemap({ data, tileWidth: T, tileHeight: T });
     const ts = this.map.addTilesetImage('tiles', 'tiles', T, T, 0, 0);
     this.layer = this.map.createLayer(0, ts, 0, 0).setDepth(0);
 
-    // partikel serpihan blok
+    // pohon
+    this.treeSprites = {};
+    for (const key of Object.keys(this.trees)) this.spawnTreeSprite(key);
+    this.time.addEvent({ delay: 500, loop: true, callback: () => this.refreshTrees() });
+
+    // partikel
     this.fx = {};
     for (const k of Object.keys(BLOCKS)) {
       this.fx[k] = this.add.particles(0, 0, 'debris' + k, {
@@ -56,136 +52,37 @@ class GameScene extends Phaser.Scene {
     cam.setBounds(0, 0, W * T, H * T);
     cam.startFollow(this.sprite, true, 0.1, 0.1);
     cam.roundPixels = true;
-
-    // vignette
     this.add.image(0, 0, 'vignette').setOrigin(0).setScrollFactor(0).setDepth(5);
 
-    // kontrol sentuh
+    // kontrol
     this.input.addPointer(2);
-    this.makeButton(60, 390, '◀', 'left');
-    this.makeButton(160, 390, '▶', 'right');
-    this.makeButton(740, 390, '▲', 'jump');
+    this.makeButton(50, 395, '◀', 'left');
+    this.makeButton(140, 395, '▶', 'right');
+    this.makeButton(750, 395, '▲', 'jump');
 
-    // hotbar
-    this.slots = HOTBAR.map((id, i) => {
-      const x = 360 + i * 80, y = 400;
-      const bg = this.add.rectangle(x, y, 64, 64, 0x000000, 0.5).setStrokeStyle(3, 0xffffff, 0.5)
+    // hotbar (dibuat sekali, diisi ulang lewat updateHud)
+    this.slots = [];
+    for (let i = 0; i < MAX_SLOTS; i++) {
+      const bg = this.add.rectangle(0, 410, 50, 50, 0x000000, 0.55).setStrokeStyle(3, 0xffffff, 0.5)
         .setScrollFactor(0).setDepth(10).setInteractive();
-      this.add.image(x, y - 4, 'tiles', BLOCKS[id].tex).setScale(1.3).setScrollFactor(0).setDepth(11);
-      const txt = this.add.text(x + 26, y + 26, '0', { fontSize: '18px', color: '#fff', stroke: '#000', strokeThickness: 4 })
+      const icon = this.add.image(0, 408, 'tiles', 0).setScrollFactor(0).setDepth(11);
+      const txt = this.add.text(0, 432, '', { fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4 })
         .setOrigin(1, 1).setScrollFactor(0).setDepth(12);
-      bg.on('pointerdown', () => { this.sel = id; this.updateHud(); });
-      return { id, bg, txt };
-    });
-    this.hint = this.add.text(400, 16, 'Tap blok = hancurkan  |  Tap kosong = pasang', {
-      fontSize: '16px', color: '#fff', stroke: '#000', strokeThickness: 4,
+      const slot = { bg, icon, txt, id: null };
+      bg.on('pointerdown', () => { if (slot.id !== null) { this.sel = slot.id; this.updateHud(); } });
+      this.slots.push(slot);
+    }
+    this.selLabel = this.add.text(400, 366, '', { fontSize: '16px', color: '#ffd54a', stroke: '#000', strokeThickness: 4 })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(12);
+    this.hint = this.add.text(400, 16, 'Tap blok = hancurkan | Seed = tanam | Pohon matang = panen', {
+      fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4,
     }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(10);
-    this.tweens.add({ targets: this.hint, alpha: 0, delay: 6000, duration: 800 });
+    this.tweens.add({ targets: this.hint, alpha: 0, delay: 7000, duration: 800 });
     this.updateHud();
 
     this.input.on('pointerdown', (ptr, over) => {
       if (over.length) return;
       this.tapWorld(ptr.worldX, ptr.worldY);
-    });
-  }
-
-  // ---------- tekstur buatan kode ----------
-  canvasTex(key, w, h, draw) {
-    const t = this.textures.createCanvas(key, w, h);
-    draw(t.getContext(), w, h);
-    t.refresh();
-    return t;
-  }
-
-  makeTextures() {
-    const P = 2; // ukuran "piksel" pada tile 16x16
-    const tiles = this.canvasTex('tiles', T * 4, T, (c) => {
-      const r = rng(42);
-      const speck = (ox, cols, n, bias = 1) => {
-        for (let i = 0; i < n; i++) {
-          c.fillStyle = cols[Math.floor(r() * cols.length)];
-          c.fillRect(ox + Math.floor(r() * 16) * P, Math.floor(r() * 16 * bias) * P, P, P);
-        }
-      };
-      const fill = (ox, col) => { c.fillStyle = col; c.fillRect(ox, 0, T, T); };
-      const dirt = (ox) => { fill(ox, '#8b5a2b'); speck(ox, ['#7a4d22', '#9c683a', '#6b4220'], 45); };
-      dirt(0); // 0 tanah
-      fill(T, '#7d7d7d'); speck(T, ['#6e6e6e', '#8e8e8e', '#5f5f5f'], 60); // 1 batu
-      c.fillStyle = '#5a5a5a';
-      for (let i = 0; i < 5; i++) c.fillRect(T + (4 + i) * P, (3 + i) * P, P, P);
-      for (let i = 0; i < 4; i++) c.fillRect(T + (10 - i) * P, (9 + i) * P, P, P);
-      dirt(T * 2); // 2 rumput
-      for (let x = 0; x < 16; x++) {
-        const d = 3 + (r() < 0.4 ? 1 : 0) + (r() < 0.2 ? 1 : 0);
-        for (let y = 0; y < d; y++) {
-          c.fillStyle = y === 0 ? '#79d06c' : y === d - 1 ? '#3b8f3f' : '#4caf50';
-          c.fillRect(T * 2 + x * P, y * P, P, P);
-        }
-      }
-      fill(T * 3, '#2b2b2b'); speck(T * 3, ['#1c1c1c', '#3d3d3d', '#4a4a4a'], 80); // 3 batuan dasar
-      for (let i = 0; i < 4; i++) { // bayangan tepi supaya tiap blok terlihat
-        c.fillStyle = 'rgba(0,0,0,0.28)';
-        c.fillRect(i * T, T - P, T, P); c.fillRect(i * T + T - P, 0, P, T);
-        c.fillStyle = 'rgba(255,255,255,0.10)';
-        c.fillRect(i * T, 0, T, P / 2); c.fillRect(i * T, 0, P / 2, T);
-      }
-    });
-    for (let i = 0; i < 4; i++) tiles.add(i, 0, i * T, 0, T, T);
-
-    for (const k of Object.keys(BLOCKS)) {
-      this.canvasTex('debris' + k, 5, 5, (c) => { c.fillStyle = BLOCKS[k].debris; c.fillRect(0, 0, 5, 5); });
-    }
-
-    // pemain 10x14 grid, tiap sel 2px
-    this.canvasTex('player', 20, 28, (c) => {
-      const R = (x, y, w, h, col) => { c.fillStyle = col; c.fillRect(x * 2, y * 2, w * 2, h * 2); };
-      R(2, 0, 6, 2, '#5b3a1e');   // rambut
-      R(2, 1, 6, 4, '#f1c27d');   // wajah
-      R(2, 1, 6, 1, '#5b3a1e');
-      R(4, 3, 1, 1, '#222'); R(7, 3, 1, 1, '#222'); // mata (menghadap kanan)
-      R(1, 5, 8, 5, '#3f7be0');   // baju
-      R(0, 5, 1, 4, '#3f7be0'); R(9, 5, 1, 4, '#3f7be0');
-      R(0, 9, 1, 1, '#f1c27d'); R(9, 9, 1, 1, '#f1c27d'); // tangan
-      R(2, 10, 3, 3, '#2d3a8c'); R(5, 10, 3, 3, '#2d3a8c'); // celana
-      R(2, 13, 3, 1, '#4a2c12'); R(5, 13, 3, 1, '#4a2c12'); // sepatu
-    });
-
-    // langit
-    this.canvasTex('sky', 800, 450, (c) => {
-      const g = c.createLinearGradient(0, 0, 0, 450);
-      g.addColorStop(0, '#3f9ae6'); g.addColorStop(1, '#c4e8ff');
-      c.fillStyle = g; c.fillRect(0, 0, 800, 450);
-    });
-    // awan (mulus horizontal)
-    this.canvasTex('clouds', 800, 150, (c) => {
-      const cloud = (x, y, s) => {
-        c.fillStyle = 'rgba(255,255,255,0.92)';
-        c.fillRect(x, y + 8 * s, 80 * s, 16 * s); c.fillRect(x + 12 * s, y, 40 * s, 16 * s); c.fillRect(x + 40 * s, y + 4 * s, 32 * s, 14 * s);
-        c.fillStyle = 'rgba(200,225,245,0.9)'; c.fillRect(x, y + 20 * s, 80 * s, 4 * s);
-      };
-      cloud(40, 30, 1); cloud(280, 80, 1.2); cloud(520, 20, 0.9); cloud(680, 85, 1);
-    });
-    // bukit
-    this.canvasTex('hills', 800, 200, (c) => {
-      const TAU = Math.PI * 2;
-      for (let x = 0; x < 800; x++) {
-        let y = 110 + 30 * Math.sin(TAU * 2 * x / 800) + 10 * Math.sin(TAU * 5 * x / 800);
-        c.fillStyle = '#8fd0a8'; c.fillRect(x, y, 1, 200 - y);
-        y = 150 + 18 * Math.sin(TAU * 3 * x / 800 + 1) + 6 * Math.sin(TAU * 7 * x / 800);
-        c.fillStyle = '#6dbb8e'; c.fillRect(x, y, 1, 200 - y);
-      }
-    });
-    // vignette
-    this.canvasTex('vignette', 800, 450, (c) => {
-      const g = c.createRadialGradient(400, 225, 170, 400, 225, 520);
-      g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.45)');
-      c.fillStyle = g; c.fillRect(0, 0, 800, 450);
-    });
-    // tombol bulat
-    this.canvasTex('btn', 80, 80, (c) => {
-      c.beginPath(); c.arc(40, 40, 36, 0, Math.PI * 2);
-      c.fillStyle = 'rgba(255,255,255,0.28)'; c.fill();
-      c.lineWidth = 3; c.strokeStyle = 'rgba(255,255,255,0.75)'; c.stroke();
     });
   }
 
@@ -198,52 +95,140 @@ class GameScene extends Phaser.Scene {
     b.on('pointerup', off); b.on('pointerout', off);
   }
 
-  // ---------- dunia ----------
-  generateWorld() {
-    const r = rng(1234);
-    const surf = [];
-    for (let x = 0; x < W; x++) surf.push(Math.round(20 + 2 * Math.sin(x * 0.15) + 1.5 * Math.sin(x * 0.37 + 1)));
-    const w = [];
-    for (let y = 0; y < H; y++) {
-      const row = [];
-      for (let x = 0; x < W; x++) {
-        const s = surf[x];
-        let v;
-        if (y === H - 1) v = 4;
-        else if (y < s) v = 0;
-        else if (y === s) v = 3;
-        else if (y < s + 8 + Math.floor(r() * 2)) v = 1;
-        else v = r() < 0.04 ? 1 : 2;
-        row.push(v);
-      }
-      w.push(row);
+  // ---------- inventory ----------
+  giveItem(id, n = 1) { this.inv[id] = (this.inv[id] || 0) + n; }
+  countOf(id) { return this.inv[id] || 0; }
+
+  updateHud() {
+    const ids = Object.keys(this.inv).map(Number).filter((id) => this.inv[id] > 0).sort((a, b) => a - b).slice(0, MAX_SLOTS);
+    if (!ids.includes(this.sel)) this.sel = ids.length ? ids[0] : null;
+    const start = 400 - (ids.length * 54) / 2 + 27;
+    this.slots.forEach((s, i) => {
+      const id = ids[i];
+      const on = id !== undefined;
+      s.id = on ? id : null;
+      s.bg.setVisible(on); s.icon.setVisible(on); s.txt.setVisible(on);
+      if (!on) return;
+      const x = start + i * 54;
+      s.bg.setX(x); s.icon.setX(x); s.txt.setX(x + 22);
+      if (isSeed(id)) s.icon.setTexture('seed' + blockOf(id)); else s.icon.setTexture('tiles', BLOCKS[id].tex);
+      s.txt.setText(String(this.inv[id]));
+      s.bg.setStrokeStyle(3, id === this.sel ? 0xffd54a : 0xffffff, id === this.sel ? 1 : 0.5);
+    });
+    this.selLabel.setText(this.sel === null ? '' : itemName(this.sel));
+  }
+
+  popup(x, y, text, color = '#ffffff') {
+    const t = this.add.text(x, y, text, { fontSize: '16px', color, stroke: '#000', strokeThickness: 4 })
+      .setOrigin(0.5).setDepth(8);
+    this.tweens.add({ targets: t, y: y - 34, alpha: 0, duration: 900, onComplete: () => t.destroy() });
+  }
+
+  save() { saveGame({ world: this.world, trees: this.trees, inv: this.inv }); }
+
+  // ---------- pohon ----------
+  treeProgress(tr) { return (Date.now() - tr.t) / (BLOCKS[tr.b].grow * 1000); }
+  treeStage(tr) { const p = this.treeProgress(tr); return p >= 1 ? 3 : p >= 0.66 ? 2 : p >= 0.33 ? 1 : 0; }
+
+  spawnTreeSprite(key) {
+    const [tx, ty] = key.split(',').map(Number);
+    const tr = this.trees[key];
+    const st = this.treeStage(tr);
+    const img = this.add.image(tx * T, ty * T, `tree${tr.b}_${st}`).setOrigin(0).setDepth(1);
+    img.stage = st;
+    this.treeSprites[key] = img;
+  }
+
+  removeTree(key) {
+    delete this.trees[key];
+    if (this.treeSprites[key]) { this.treeSprites[key].destroy(); delete this.treeSprites[key]; }
+  }
+
+  refreshTrees() {
+    for (const key of Object.keys(this.trees)) {
+      const tr = this.trees[key], img = this.treeSprites[key];
+      const st = this.treeStage(tr);
+      if (img && img.stage !== st) { img.setTexture(`tree${tr.b}_${st}`); img.stage = st; }
     }
-    for (let i = 0; i < 7; i++) { // gua kecil
-      const cx = Math.floor(r() * W), cy = 30 + Math.floor(r() * 14);
-      const rx = 3 + Math.floor(r() * 3), ry = 2 + Math.floor(r() * 2);
-      for (let y = cy - ry; y <= cy + ry; y++) for (let x = cx - rx; x <= cx + rx; x++) {
-        if (x < 0 || x >= W || y < 0 || y >= H - 1) continue;
-        if (((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1) w[y][x] = 0;
-      }
+  }
+
+  // ---------- aksi (semua lewat satu pintu, siap dipindah ke server nanti) ----------
+  tapWorld(wx, wy) {
+    const tx = Math.floor(wx / T), ty = Math.floor(wy / T);
+    if (tx < 0 || tx >= W || ty < 0 || ty >= H) return;
+    const pcx = (this.p.x + this.p.w / 2) / T, pcy = (this.p.y + this.p.h / 2) / T;
+    if (Math.hypot(tx + 0.5 - pcx, ty + 0.5 - pcy) > 4) return; // jangkauan 4 tile
+    const key = tx + ',' + ty;
+    if (this.trees[key]) this.tapTree(tx, ty, key);
+    else if (this.world[ty][tx] > 0) this.breakBlock(tx, ty);
+    else this.useSelected(tx, ty);
+  }
+
+  flash(tx, ty) {
+    const f = this.add.rectangle(tx * T, ty * T, T, T, 0xffffff, 0.5).setOrigin(0).setDepth(4);
+    this.tweens.add({ targets: f, alpha: 0, duration: 180, onComplete: () => f.destroy() });
+  }
+
+  breakBlock(tx, ty) {
+    const t = this.world[ty][tx];
+    const def = BLOCKS[t];
+    if (def.unbreakable) return;
+    const cx = tx * T + T / 2, cy = ty * T + T / 2;
+    this.world[ty][tx] = 0;
+    this.layer.removeTileAt(tx, ty);
+    this.giveItem(def.drop || t);
+    if (def.grow && Math.random() < SEED_DROP_CHANCE) {
+      this.giveItem(seedId(t));
+      this.popup(cx, cy - 10, '+' + itemName(seedId(t)), '#ffd54a');
     }
-    return w;
+    this.fx[t].explode(10, cx, cy);
+    const above = tx + ',' + (ty - 1); // pohon di atasnya ikut hilang, seed dikembalikan
+    if (this.trees[above]) {
+      this.giveItem(seedId(this.trees[above].b));
+      this.removeTree(above);
+    }
+    this.flash(tx, ty); this.updateHud(); this.save();
   }
 
-  loadWorld() {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (raw) {
-        const w = JSON.parse(raw);
-        if (Array.isArray(w) && w.length === H && w[0].length === W) return w;
-      }
-    } catch (e) { /* abaikan */ }
-    return this.generateWorld();
+  useSelected(tx, ty) {
+    const id = this.sel;
+    if (id === null || this.countOf(id) < 1) return;
+    if (isSeed(id)) { // tanam: harus di atas blok padat
+      if (ty + 1 >= H || this.world[ty + 1][tx] <= 0) { this.popup(tx * T + 16, ty * T, 'Butuh tanah di bawah', '#ff8a80'); return; }
+      const key = tx + ',' + ty;
+      this.trees[key] = { b: blockOf(id), t: Date.now() };
+      this.spawnTreeSprite(key);
+    } else { // pasang blok
+      this.world[ty][tx] = id;
+      const p = this.p;
+      const xs = [p.x, p.x + p.w - 1], ys = [p.y, p.y + p.h / 2, p.y + p.h - 1];
+      if (xs.some((x) => ys.some((y) => Math.floor(x / T) === tx && Math.floor(y / T) === ty))) { this.world[ty][tx] = 0; return; }
+      this.layer.putTileAt(BLOCKS[id].tex, tx, ty);
+    }
+    this.inv[id]--;
+    this.flash(tx, ty); this.updateHud(); this.save();
   }
 
-  saveWorld() {
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(this.world)); } catch (e) { /* abaikan */ }
+  tapTree(tx, ty, key) {
+    const tr = this.trees[key];
+    const x = tx * T + T / 2, y = ty * T;
+    const prog = this.treeProgress(tr);
+    if (prog < 1) {
+      const left = Math.ceil(BLOCKS[tr.b].grow * (1 - prog));
+      this.popup(x, y, `Matang ${left} dtk`, '#ffffff');
+      return;
+    }
+    const n = 1 + Math.floor(Math.random() * 3);
+    this.giveItem(tr.b, n);
+    let msg = `+${n} ${BLOCKS[tr.b].name}`;
+    if (Math.random() < HARVEST_SEED_CHANCE) { this.giveItem(seedId(tr.b)); msg += ' +1 seed'; }
+    this.fx[tr.b].explode(14, x, y + 16);
+    this.popup(x, y, msg, '#9cff9c');
+    this.removeTree(key);
+    this.updateHud(); this.save();
   }
 
+  // ---------- fisika ----------
   solid(px, py) {
     const tx = Math.floor(px / T), ty = Math.floor(py / T);
     if (tx < 0 || tx >= W || ty >= H) return true;
@@ -257,38 +242,6 @@ class GameScene extends Phaser.Scene {
     return xs.some((x) => ys.some((y) => this.solid(x, y)));
   }
 
-  tapWorld(wx, wy) {
-    const tx = Math.floor(wx / T), ty = Math.floor(wy / T);
-    if (tx < 0 || tx >= W || ty < 0 || ty >= H) return;
-    const pcx = (this.p.x + this.p.w / 2) / T, pcy = (this.p.y + this.p.h / 2) / T;
-    if (Math.hypot(tx + 0.5 - pcx, ty + 0.5 - pcy) > 4) return; // jangkauan 4 tile
-    const t = this.world[ty][tx];
-    const cx = tx * T + T / 2, cy = ty * T + T / 2;
-    if (t === 4) return;
-    if (t > 0) {
-      this.world[ty][tx] = 0;
-      this.layer.removeTileAt(tx, ty);
-      this.inv[t === 3 ? 1 : t]++;
-      this.fx[t].explode(10, cx, cy);
-    } else if (this.inv[this.sel] > 0) {
-      this.world[ty][tx] = this.sel;
-      if (this.hits(this.p)) { this.world[ty][tx] = 0; return; } // jangan pasang di dalam pemain
-      this.layer.putTileAt(BLOCKS[this.sel].tex, tx, ty);
-      this.inv[this.sel]--;
-    } else return;
-    const f = this.add.rectangle(tx * T, ty * T, T, T, 0xffffff, 0.5).setOrigin(0).setDepth(4);
-    this.tweens.add({ targets: f, alpha: 0, duration: 180, onComplete: () => f.destroy() });
-    this.updateHud();
-    this.saveWorld();
-  }
-
-  updateHud() {
-    for (const s of this.slots) {
-      s.txt.setText(String(this.inv[s.id]));
-      s.bg.setStrokeStyle(3, s.id === this.sel ? 0xffd54a : 0xffffff, s.id === this.sel ? 1 : 0.5);
-    }
-  }
-
   update(time, delta) {
     const dt = Math.min(delta / 1000, 0.033);
     const p = this.p;
@@ -299,7 +252,6 @@ class GameScene extends Phaser.Scene {
 
     p.x += p.vx * dt;
     if (this.hits(p)) { p.x -= p.vx * dt; p.vx = 0; }
-
     p.ground = false;
     p.y += p.vy * dt;
     if (this.hits(p)) {
