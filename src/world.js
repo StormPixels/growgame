@@ -48,13 +48,13 @@ export function loadGame() {
     if (raw) {
       const d = JSON.parse(raw);
       if (d && d.v === 3 && Array.isArray(d.world) && d.world.length === H && d.world[0].length === W) {
-        return { world: d.world, trees: d.trees || {}, inv: d.inv || {} };
+        return { world: d.world, trees: d.trees || {}, inv: d.inv || {}, discovered: d.discovered || {} };
       }
     }
   } catch (e) { /* abaikan */ }
-  return { world: generateWorld(), trees: {}, inv: { [seedId(1)]: 3 } }; // awal: 3 seed tanah
+  return { world: generateWorld(), trees: {}, inv: { [seedId(1)]: 3, [seedId(2)]: 2 }, discovered: {} }; // awal: seed tanah & batu
 }
 
-export function saveGame({ world, trees, inv }) {
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ v: 3, world, trees, inv })); } catch (e) { /* abaikan */ }
+export function saveGame({ world, trees, inv, discovered }) {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ v: 3, world, trees, inv, discovered })); } catch (e) { /* abaikan */ }
 }

@@ -37,6 +37,25 @@ export function makeTextures(scene) {
     }
     fill(T * 3, '#2b2b2b'); speck(T * 3, ['#1c1c1c', '#3d3d3d', '#4a4a4a'], 80);
     fill(T * 4, '#e3cf8e'); speck(T * 4, ['#d4be78', '#efdca0', '#c9b36a'], 55);
+    // 5 kerikil
+    fill(T * 5, '#8f8a82'); speck(T * 5, ['#a39d94', '#78736b', '#b3aca0', '#6a655e'], 70);
+    // 6 kayu (papan)
+    fill(T * 6, '#b5803f'); speck(T * 6, ['#a5702f', '#c18d4c'], 25);
+    c.fillStyle = '#8a5a28';
+    for (const y of [10, 21]) c.fillRect(T * 6, y, T, 2);
+    c.fillRect(T * 6 + 6, 3, 2, 2); c.fillRect(T * 6 + 24, 14, 2, 2); c.fillRect(T * 6 + 8, 25, 2, 2);
+    // 7 kaca (tembus pandang)
+    c.fillStyle = 'rgba(190,235,250,0.35)'; c.fillRect(T * 7, 0, T, T);
+    c.fillStyle = 'rgba(255,255,255,0.75)';
+    c.fillRect(T * 7, 0, T, 2); c.fillRect(T * 7, 0, 2, T); c.fillRect(T * 7, T - 2, T, 2); c.fillRect(T * 7 + T - 2, 0, 2, T);
+    for (let i = 0; i < 5; i++) c.fillRect(T * 7 + 7 + i * 3, 19 - i * 3, 3, 3);
+    // 8 bata
+    fill(T * 8, '#b5503a'); speck(T * 8, ['#a3452f', '#c25d46'], 30);
+    c.fillStyle = '#d8c9b8';
+    for (let r = 0; r < 4; r++) {
+      c.fillRect(T * 8, r * 8 + 6, T, 2);
+      for (const x of (r % 2 === 0 ? [15] : [7, 23])) c.fillRect(T * 8 + x, r * 8, 2, 6);
+    }
     for (let i = 0; i < N; i++) {
       c.fillStyle = 'rgba(0,0,0,0.28)';
       c.fillRect(i * T, T - P, T, P); c.fillRect(i * T + T - P, 0, P, T);

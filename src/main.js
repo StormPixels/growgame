@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { BLOCKS, isSeed, blockOf, seedId, itemName, SEED_DROP_CHANCE, HARVEST_SEED_CHANCE } from './items.js';
+import { BLOCKS, RECIPES, recipeKey, recipeResult, isSeed, blockOf, seedId, itemName, SEED_DROP_CHANCE, HARVEST_SEED_CHANCE } from './items.js';
 import { T, W, H, loadGame, saveGame } from './world.js';
 import { makeTextures } from './textures.js';
 
@@ -13,6 +13,10 @@ class GameScene extends Phaser.Scene {
     this.trees = save.trees;   // { "x,y": { b: idBlok, t: waktuTanam(ms) } }
     this.inv = save.inv;       // { idItem: jumlah }
     this.sel = null;
+    this.discovered = save.discovered; // resep yang sudah ditemukan
+    this.page = 0;
+    this.pages = 1;
+    this.book = null;
     this.keys = { left: false, right: false, jump: false };
     this.facing = 1;
 
@@ -78,9 +82,27 @@ class GameScene extends Phaser.Scene {
       fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4,
     }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(10);
     this.tweens.add({ targets: this.hint, alpha: 0, delay: 7000, duration: 800 });
+
+    // tombol ganti halaman hotbar
+    const pageBtn = (x, label, dir) => {
+      const t = this.add.text(x, 366, label, { fontSize: '26px', color: '#fff', stroke: '#000', strokeThickness: 4, padding: { x: 14, y: 8 } })
+        .setOrigin(0.5).setScrollFactor(0).setDepth(12).setInteractive();
+      t.on('pointerdown', () => { this.page = (this.page + dir + this.pages) % this.pages; this.updateHud(); });
+      return t;
+    };
+    this.pageL = pageBtn(255, '‹', -1);
+    this.pageR = pageBtn(545, '›', 1);
+
+    // tombol buku resep
+    this.bookBtn = this.add.rectangle(748, 30, 88, 34, 0x000000, 0.55).setStrokeStyle(2, 0xffffff, 0.6)
+      .setScrollFactor(0).setDepth(10).setInteractive();
+    this.add.text(748, 30, 'Resep', { fontSize: '17px', color: '#fff' }).setOrigin(0.5).setScrollFactor(0).setDepth(11);
+    this.bookBtn.on('pointerdown', () => this.toggleBook());
+
     this.updateHud();
 
     this.input.on('pointerdown', (ptr, over) => {
+      if (this.book) { if (!over.length) this.toggleBook(); return; }
       if (over.length) return;
       this.tapWorld(ptr.worldX, ptr.worldY);
     });
@@ -100,8 +122,11 @@ class GameScene extends Phaser.Scene {
   countOf(id) { return this.inv[id] || 0; }
 
   updateHud() {
-    const ids = Object.keys(this.inv).map(Number).filter((id) => this.inv[id] > 0).sort((a, b) => a - b).slice(0, MAX_SLOTS);
-    if (!ids.includes(this.sel)) this.sel = ids.length ? ids[0] : null;
+    const all = Object.keys(this.inv).map(Number).filter((id) => this.inv[id] > 0).sort((a, b) => a - b);
+    this.pages = Math.max(1, Math.ceil(all.length / MAX_SLOTS));
+    this.page = Math.min(this.page, this.pages - 1);
+    if (!all.includes(this.sel)) { this.sel = all.length ? all[0] : null; this.page = 0; }
+    const ids = all.slice(this.page * MAX_SLOTS, (this.page + 1) * MAX_SLOTS);
     const start = 400 - (ids.length * 54) / 2 + 27;
     this.slots.forEach((s, i) => {
       const id = ids[i];
@@ -115,7 +140,9 @@ class GameScene extends Phaser.Scene {
       s.txt.setText(String(this.inv[id]));
       s.bg.setStrokeStyle(3, id === this.sel ? 0xffd54a : 0xffffff, id === this.sel ? 1 : 0.5);
     });
-    this.selLabel.setText(this.sel === null ? '' : itemName(this.sel));
+    this.pageL.setVisible(this.pages > 1); this.pageR.setVisible(this.pages > 1);
+    const pg = this.pages > 1 ? `  (${this.page + 1}/${this.pages})` : '';
+    this.selLabel.setText(this.sel === null ? '' : itemName(this.sel) + pg);
   }
 
   popup(x, y, text, color = '#ffffff') {
@@ -124,7 +151,7 @@ class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: t, y: y - 34, alpha: 0, duration: 900, onComplete: () => t.destroy() });
   }
 
-  save() { saveGame({ world: this.world, trees: this.trees, inv: this.inv }); }
+  save() { saveGame({ world: this.world, trees: this.trees, inv: this.inv, discovered: this.discovered }); }
 
   // ---------- pohon ----------
   treeProgress(tr) { return (Date.now() - tr.t) / (BLOCKS[tr.b].grow * 1000); }
@@ -214,6 +241,11 @@ class GameScene extends Phaser.Scene {
     const x = tx * T + T / 2, y = ty * T;
     const prog = this.treeProgress(tr);
     if (prog < 1) {
+      // seed lain dipilih & pohon belum matang -> coba splicing
+      if (this.sel !== null && isSeed(this.sel) && this.countOf(this.sel) > 0 && blockOf(this.sel) !== tr.b) {
+        this.spliceTree(tx, ty, key);
+        return;
+      }
       const left = Math.ceil(BLOCKS[tr.b].grow * (1 - prog));
       this.popup(x, y, `Matang ${left} dtk`, '#ffffff');
       return;
@@ -226,6 +258,47 @@ class GameScene extends Phaser.Scene {
     this.popup(x, y, msg, '#9cff9c');
     this.removeTree(key);
     this.updateHud(); this.save();
+  }
+
+  spliceTree(tx, ty, key) {
+    const tr = this.trees[key];
+    const x = tx * T + T / 2, y = ty * T;
+    const b2 = blockOf(this.sel);
+    const result = recipeResult(tr.b, b2);
+    if (!result) { this.popup(x, y, 'Tidak cocok', '#ff8a80'); return; }
+    this.inv[this.sel]--;
+    const rk = recipeKey(tr.b, b2);
+    const isNew = !this.discovered[rk];
+    this.discovered[rk] = true;
+    tr.b = result;
+    tr.t = Date.now(); // pohon hasil splicing mulai tumbuh dari awal
+    const img = this.treeSprites[key];
+    img.setTexture(`tree${result}_0`); img.stage = 0;
+    this.fx[result].explode(18, x, y + 16);
+    this.flash(tx, ty);
+    this.popup(x, y, (isNew ? 'Resep baru! ' : 'Splice! ') + BLOCKS[result].name, '#ffd54a');
+    this.updateHud(); this.save();
+  }
+
+  toggleBook() {
+    if (this.book) { this.book.forEach((o) => o.destroy()); this.book = null; return; }
+    const keys = Object.keys(RECIPES);
+    const found = keys.filter((k) => this.discovered[k]).length;
+    const lines = keys.map((k) => {
+      if (!this.discovered[k]) return '?  +  ?  =  ?';
+      const [a, b] = k.split('+').map(Number);
+      return `${BLOCKS[a].name}  +  ${BLOCKS[b].name}  =  ${BLOCKS[RECIPES[k]].name}`;
+    });
+    const bg = this.add.rectangle(400, 225, 560, 320, 0x000000, 0.88).setStrokeStyle(3, 0xffffff, 0.6)
+      .setScrollFactor(0).setDepth(20).setInteractive();
+    const st = { fontSize: '20px', color: '#fff', align: 'center', lineSpacing: 10 };
+    const title = this.add.text(400, 88, `Buku Resep (${found}/${keys.length})`, { ...st, fontSize: '24px', color: '#ffd54a' })
+      .setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
+    const body = this.add.text(400, 135, lines.join('\n'), st).setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
+    const foot = this.add.text(400, 340, 'Cara: pilih seed, lalu tap pohon lain yang belum matang.\nTap di mana saja untuk menutup.', { ...st, fontSize: '15px', color: '#cfcfcf' })
+      .setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
+    bg.on('pointerdown', () => this.toggleBook());
+    this.book = [bg, title, body, foot];
   }
 
   // ---------- fisika ----------
