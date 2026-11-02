@@ -3,7 +3,8 @@ import { BLOCKS, RECIPES, recipeKey, recipeResult, isSeed, blockOf, seedId, item
 import { T, W, H, loadGame, saveGame } from './world.js';
 import { makeTextures } from './textures.js';
 
-const MAX_SLOTS = 8;
+const ZMIN = 0.6, ZMAX = 2.5;          // batas zoom (cubit)
+const COLS = 8, CELL = 66, MAXCELLS = 32; // grid ransel
 
 class GameScene extends Phaser.Scene {
   create() {
@@ -12,37 +13,44 @@ class GameScene extends Phaser.Scene {
     this.world = save.world;
     this.trees = save.trees;   // { "x,y": { b: idBlok, t: waktuTanam(ms) } }
     this.inv = save.inv;       // { idItem: jumlah }
+    this.discovered = save.discovered;
     this.sel = null;
-    this.discovered = save.discovered; // resep yang sudah ditemukan
-    this.page = 0;
-    this.pages = 1;
     this.book = null;
+    this.packOpen = false;
+    this.barDown = false;
+    this.packDragY = null;
+    this.pinch = null;
     this.keys = { left: false, right: false, jump: false };
     this.facing = 1;
 
+    // 3 kamera: latar (tetap) -> dunia (bisa zoom) -> UI (tetap)
+    this.cams = {
+      bg: this.cameras.main,
+      world: this.cameras.add(0, 0, 800, 450),
+      ui: this.cameras.add(0, 0, 800, 450),
+    };
+
     // latar
-    this.add.image(0, 0, 'sky').setOrigin(0).setScrollFactor(0).setDepth(-10);
-    this.clouds = this.add.tileSprite(0, 0, 800, 150, 'clouds').setOrigin(0).setScrollFactor(0).setDepth(-9);
-    this.hills = this.add.tileSprite(0, 0, 800, 200, 'hills').setOrigin(0).setScrollFactor(0).setDepth(-8);
+    this.bgO(this.add.image(0, 0, 'sky').setOrigin(0).setDepth(-10));
+    this.clouds = this.bgO(this.add.tileSprite(0, 0, 800, 150, 'clouds').setOrigin(0).setDepth(-9));
+    this.hills = this.bgO(this.add.tileSprite(0, 0, 800, 200, 'hills').setOrigin(0).setDepth(-8));
 
     // dunia
     const data = this.world.map((r) => r.map((v) => (v ? BLOCKS[v].tex : -1)));
     this.map = this.make.tilemap({ data, tileWidth: T, tileHeight: T });
     const ts = this.map.addTilesetImage('tiles', 'tiles', T, T, 0, 0);
-    this.layer = this.map.createLayer(0, ts, 0, 0).setDepth(0);
+    this.layer = this.wO(this.map.createLayer(0, ts, 0, 0).setDepth(0));
 
-    // pohon
     this.treeSprites = {};
     for (const key of Object.keys(this.trees)) this.spawnTreeSprite(key);
     this.time.addEvent({ delay: 500, loop: true, callback: () => this.refreshTrees() });
 
-    // partikel
     this.fx = {};
     for (const k of Object.keys(BLOCKS)) {
-      this.fx[k] = this.add.particles(0, 0, 'debris' + k, {
+      this.fx[k] = this.wO(this.add.particles(0, 0, 'debris' + k, {
         speed: { min: 60, max: 200 }, angle: { min: 200, max: 340 }, gravityY: 700,
         lifespan: 600, scale: { start: 1.3, end: 0.2 }, emitting: false,
-      }).setDepth(3);
+      }).setDepth(3));
     }
 
     // pemain
@@ -50,104 +58,160 @@ class GameScene extends Phaser.Scene {
     const cx = Math.floor(W / 2);
     while (sy < H && !this.world[sy][cx]) sy++;
     this.p = { x: cx * T + 6, y: sy * T - 30, w: 20, h: 28, vx: 0, vy: 0, ground: false };
-    this.sprite = this.add.image(0, 0, 'player').setOrigin(0.5, 1).setDepth(2);
+    this.sprite = this.wO(this.add.image(0, 0, 'player').setOrigin(0.5, 1).setDepth(2));
 
-    const cam = this.cameras.main;
-    cam.setBounds(0, 0, W * T, H * T);
-    cam.startFollow(this.sprite, true, 0.1, 0.1);
-    cam.roundPixels = true;
-    this.add.image(0, 0, 'vignette').setOrigin(0).setScrollFactor(0).setDepth(5);
+    const wc = this.cams.world;
+    wc.setBounds(0, 0, W * T, H * T);
+    wc.startFollow(this.sprite, true, 0.1, 0.1);
+    wc.roundPixels = true;
 
-    // kontrol
+    // ---------- UI ----------
+    this.uiO(this.add.image(0, 0, 'vignette').setOrigin(0).setDepth(5));
     this.input.addPointer(2);
     this.makeButton(50, 395, '◀', 'left');
     this.makeButton(140, 395, '▶', 'right');
     this.makeButton(750, 395, '▲', 'jump');
 
-    // hotbar (dibuat sekali, diisi ulang lewat updateHud)
-    this.slots = [];
-    for (let i = 0; i < MAX_SLOTS; i++) {
-      const bg = this.add.rectangle(0, 410, 50, 50, 0x000000, 0.55).setStrokeStyle(3, 0xffffff, 0.5)
-        .setScrollFactor(0).setDepth(10).setInteractive();
-      const icon = this.add.image(0, 408, 'tiles', 0).setScrollFactor(0).setDepth(11);
-      const txt = this.add.text(0, 432, '', { fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4 })
-        .setOrigin(1, 1).setScrollFactor(0).setDepth(12);
-      const slot = { bg, icon, txt, id: null };
-      bg.on('pointerdown', () => { if (slot.id !== null) { this.sel = slot.id; this.updateHud(); } });
-      this.slots.push(slot);
-    }
-    this.selLabel = this.add.text(400, 366, '', { fontSize: '16px', color: '#ffd54a', stroke: '#000', strokeThickness: 4 })
-      .setOrigin(0.5).setScrollFactor(0).setDepth(12);
-    this.hint = this.add.text(400, 16, 'Tap blok = hancurkan | Seed = tanam | Pohon matang = panen', {
-      fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4,
-    }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(10);
-    this.tweens.add({ targets: this.hint, alpha: 0, delay: 7000, duration: 800 });
+    // bar item terpilih (tap / geser ke atas = buka ransel)
+    this.barBg = this.uiO(this.add.rectangle(400, 412, 300, 58, 0x000000, 0.6).setStrokeStyle(3, 0xffffff, 0.6).setDepth(10).setInteractive());
+    this.barIcon = this.uiO(this.add.image(268, 412, 'tiles', 0).setDepth(11));
+    this.barTxt = this.uiO(this.add.text(300, 412, '', { fontSize: '18px', color: '#fff', stroke: '#000', strokeThickness: 4 }).setOrigin(0, 0.5).setDepth(11));
+    this.uiO(this.add.text(528, 412, '▲', { fontSize: '16px', color: '#ffd54a' }).setOrigin(0.5).setDepth(11));
+    this.barBg.on('pointerdown', () => { this.barDown = true; });
 
-    // tombol ganti halaman hotbar
-    const pageBtn = (x, label, dir) => {
-      const t = this.add.text(x, 366, label, { fontSize: '26px', color: '#fff', stroke: '#000', strokeThickness: 4, padding: { x: 14, y: 8 } })
-        .setOrigin(0.5).setScrollFactor(0).setDepth(12).setInteractive();
-      t.on('pointerdown', () => { this.page = (this.page + dir + this.pages) % this.pages; this.updateHud(); });
-      return t;
-    };
-    this.pageL = pageBtn(255, '‹', -1);
-    this.pageR = pageBtn(545, '›', 1);
+    this.buildPack();
 
-    // tombol buku resep
-    this.bookBtn = this.add.rectangle(748, 30, 88, 34, 0x000000, 0.55).setStrokeStyle(2, 0xffffff, 0.6)
-      .setScrollFactor(0).setDepth(10).setInteractive();
-    this.add.text(748, 30, 'Resep', { fontSize: '17px', color: '#fff' }).setOrigin(0.5).setScrollFactor(0).setDepth(11);
+    this.bookBtn = this.uiO(this.add.rectangle(748, 30, 88, 34, 0x000000, 0.55).setStrokeStyle(2, 0xffffff, 0.6).setDepth(10).setInteractive());
+    this.uiO(this.add.text(748, 30, 'Resep', { fontSize: '17px', color: '#fff' }).setOrigin(0.5).setDepth(11));
     this.bookBtn.on('pointerdown', () => this.toggleBook());
+
+    this.hint = this.uiO(this.add.text(400, 14, 'Tap = aksi  |  Cubit = zoom  |  Tap/geser bar bawah = ransel', {
+      fontSize: '15px', color: '#fff', stroke: '#000', strokeThickness: 4,
+    }).setOrigin(0.5, 0).setDepth(10));
+    this.tweens.add({ targets: this.hint, alpha: 0, delay: 7000, duration: 800 });
+    this.zoomTxt = this.uiO(this.add.text(400, 52, '', { fontSize: '16px', color: '#ffd54a', stroke: '#000', strokeThickness: 4 })
+      .setOrigin(0.5, 0).setDepth(10).setAlpha(0));
 
     this.updateHud();
 
+    // ---------- input ----------
     this.input.on('pointerdown', (ptr, over) => {
-      if (this.book) { if (!over.length) this.toggleBook(); return; }
-      if (over.length) return;
-      this.tapWorld(ptr.worldX, ptr.worldY);
+      ptr.onUI = over.length > 0;
+      ptr.pinched = false;
+      if (this.book) { ptr.onUI = true; if (!over.length) this.toggleBook(); }
+    });
+    this.input.on('pointerup', (ptr) => {
+      if (this.barDown) {
+        this.barDown = false;
+        const dy = ptr.downY - ptr.upY;
+        if (dy > 20 || Math.abs(dy) < 12) this.openPack();
+        return;
+      }
+      if (this.packDragY !== null) {
+        const dy = ptr.upY - this.packDragY;
+        this.packDragY = null;
+        if (dy > 40) this.closePack(); // geser ke bawah menutup
+        return;
+      }
+      if (ptr.onUI || ptr.pinched) return;
+      const moved = Phaser.Math.Distance.Between(ptr.downX, ptr.downY, ptr.upX, ptr.upY);
+      if (moved > 14 || ptr.upTime - ptr.downTime > 400) return; // hanya tap singkat
+      const wp = this.cams.world.getWorldPoint(ptr.upX, ptr.upY);
+      this.tapWorld(wp.x, wp.y);
     });
   }
 
+  // ---------- pembagian kamera ----------
+  reg(o, group) {
+    for (const k of ['bg', 'world', 'ui']) if (k !== group) this.cams[k].ignore(o);
+    return o;
+  }
+  bgO(o) { return this.reg(o, 'bg'); }
+  wO(o) { return this.reg(o, 'world'); }
+  uiO(o) { o.setScrollFactor(0); return this.reg(o, 'ui'); }
+
   makeButton(x, y, label, key) {
-    const b = this.add.image(x, y, 'btn').setScrollFactor(0).setDepth(10).setInteractive();
-    this.add.text(x, y, label, { fontSize: '30px', color: '#fff', stroke: '#000', strokeThickness: 4 })
-      .setOrigin(0.5).setScrollFactor(0).setDepth(11);
+    const b = this.uiO(this.add.image(x, y, 'btn').setDepth(10).setInteractive());
+    this.uiO(this.add.text(x, y, label, { fontSize: '30px', color: '#fff', stroke: '#000', strokeThickness: 4 })
+      .setOrigin(0.5).setDepth(11));
     b.on('pointerdown', () => { this.keys[key] = true; b.setAlpha(0.6); });
     const off = () => { this.keys[key] = false; b.setAlpha(1); };
     b.on('pointerup', off); b.on('pointerout', off);
   }
 
-  // ---------- inventory ----------
+  // ---------- inventory & ransel ----------
   giveItem(id, n = 1) { this.inv[id] = (this.inv[id] || 0) + n; }
   countOf(id) { return this.inv[id] || 0; }
+  itemIds() { return Object.keys(this.inv).map(Number).filter((id) => this.inv[id] > 0).sort((a, b) => a - b); }
 
   updateHud() {
-    const all = Object.keys(this.inv).map(Number).filter((id) => this.inv[id] > 0).sort((a, b) => a - b);
-    this.pages = Math.max(1, Math.ceil(all.length / MAX_SLOTS));
-    this.page = Math.min(this.page, this.pages - 1);
-    if (!all.includes(this.sel)) { this.sel = all.length ? all[0] : null; this.page = 0; }
-    const ids = all.slice(this.page * MAX_SLOTS, (this.page + 1) * MAX_SLOTS);
-    const start = 400 - (ids.length * 54) / 2 + 27;
-    this.slots.forEach((s, i) => {
-      const id = ids[i];
-      const on = id !== undefined;
-      s.id = on ? id : null;
-      s.bg.setVisible(on); s.icon.setVisible(on); s.txt.setVisible(on);
-      if (!on) return;
-      const x = start + i * 54;
-      s.bg.setX(x); s.icon.setX(x); s.txt.setX(x + 22);
-      if (isSeed(id)) s.icon.setTexture('seed' + blockOf(id)); else s.icon.setTexture('tiles', BLOCKS[id].tex);
-      s.txt.setText(String(this.inv[id]));
-      s.bg.setStrokeStyle(3, id === this.sel ? 0xffd54a : 0xffffff, id === this.sel ? 1 : 0.5);
+    const ids = this.itemIds();
+    if (!ids.includes(this.sel)) this.sel = ids.length ? ids[0] : null;
+    if (this.sel === null) {
+      this.barIcon.setVisible(false);
+      this.barTxt.setText('Ransel kosong');
+    } else {
+      if (isSeed(this.sel)) this.barIcon.setTexture('seed' + blockOf(this.sel));
+      else this.barIcon.setTexture('tiles', BLOCKS[this.sel].tex);
+      this.barIcon.setVisible(true);
+      this.barTxt.setText(`${itemName(this.sel)}  x${this.inv[this.sel]}`);
+    }
+  }
+
+  buildPack() {
+    const c = this.uiO(this.add.container(0, 450).setDepth(30).setVisible(false));
+    const dim = this.add.rectangle(400, 225, 800, 450, 0x000000, 0.45).setInteractive();
+    dim.on('pointerdown', () => this.closePack());
+    const panel = this.add.rectangle(400, 285, 580, 330, 0x1d1d1d, 0.96).setStrokeStyle(3, 0xffffff, 0.5).setInteractive();
+    panel.on('pointerdown', (p) => { this.packDragY = p.y; });
+    const grip = this.add.rectangle(400, 128, 60, 5, 0xffffff, 0.5);
+    this.packTitle = this.add.text(400, 150, '', { fontSize: '18px', color: '#ffd54a', stroke: '#000', strokeThickness: 3 }).setOrigin(0.5);
+    c.add([dim, panel, grip, this.packTitle]);
+    this.pack = c;
+    this.packCells = [];
+  }
+
+  refreshPack() {
+    this.packCells.forEach((o) => o.destroy());
+    this.packCells = [];
+    const ids = this.itemIds().slice(0, MAXCELLS);
+    this.packTitle.setText(this.sel === null ? 'Ransel kosong' : 'Ransel  ·  ' + itemName(this.sel));
+    ids.forEach((id, i) => {
+      const col = i % COLS, row = Math.floor(i / COLS);
+      const x = 400 - (COLS * CELL) / 2 + CELL / 2 + col * CELL, y = 200 + row * CELL;
+      const bg = this.add.rectangle(x, y, CELL - 6, CELL - 6, 0x2f2f2f, 1)
+        .setStrokeStyle(3, id === this.sel ? 0xffd54a : 0x666666, 1).setInteractive();
+      const icon = (isSeed(id) ? this.add.image(x, y - 3, 'seed' + blockOf(id)) : this.add.image(x, y - 3, 'tiles', BLOCKS[id].tex)).setScale(1.2);
+      const txt = this.add.text(x + CELL / 2 - 8, y + CELL / 2 - 8, String(this.inv[id]), { fontSize: '14px', color: '#fff', stroke: '#000', strokeThickness: 4 }).setOrigin(1, 1);
+      bg.on('pointerdown', () => {
+        this.sel = id;
+        this.updateHud();
+        this.time.delayedCall(120, () => this.closePack());
+      });
+      this.pack.add([bg, icon, txt]);
+      this.packCells.push(bg, icon, txt);
     });
-    this.pageL.setVisible(this.pages > 1); this.pageR.setVisible(this.pages > 1);
-    const pg = this.pages > 1 ? `  (${this.page + 1}/${this.pages})` : '';
-    this.selLabel.setText(this.sel === null ? '' : itemName(this.sel) + pg);
+  }
+
+  openPack() {
+    if (this.packOpen) return;
+    this.packOpen = true;
+    this.refreshPack();
+    this.pack.setVisible(true);
+    this.tweens.killTweensOf(this.pack);
+    this.tweens.add({ targets: this.pack, y: 0, duration: 220, ease: 'Cubic.easeOut' });
+  }
+
+  closePack() {
+    if (!this.packOpen) return;
+    this.packOpen = false;
+    this.tweens.killTweensOf(this.pack);
+    this.tweens.add({ targets: this.pack, y: 450, duration: 180, ease: 'Cubic.easeIn', onComplete: () => this.pack.setVisible(false) });
   }
 
   popup(x, y, text, color = '#ffffff') {
-    const t = this.add.text(x, y, text, { fontSize: '16px', color, stroke: '#000', strokeThickness: 4 })
-      .setOrigin(0.5).setDepth(8);
+    const t = this.wO(this.add.text(x, y, text, { fontSize: '16px', color, stroke: '#000', strokeThickness: 4 })
+      .setOrigin(0.5).setDepth(8));
     this.tweens.add({ targets: t, y: y - 34, alpha: 0, duration: 900, onComplete: () => t.destroy() });
   }
 
@@ -161,7 +225,7 @@ class GameScene extends Phaser.Scene {
     const [tx, ty] = key.split(',').map(Number);
     const tr = this.trees[key];
     const st = this.treeStage(tr);
-    const img = this.add.image(tx * T, ty * T, `tree${tr.b}_${st}`).setOrigin(0).setDepth(1);
+    const img = this.wO(this.add.image(tx * T, ty * T, `tree${tr.b}_${st}`).setOrigin(0).setDepth(1));
     img.stage = st;
     this.treeSprites[key] = img;
   }
@@ -192,7 +256,7 @@ class GameScene extends Phaser.Scene {
   }
 
   flash(tx, ty) {
-    const f = this.add.rectangle(tx * T, ty * T, T, T, 0xffffff, 0.5).setOrigin(0).setDepth(4);
+    const f = this.wO(this.add.rectangle(tx * T, ty * T, T, T, 0xffffff, 0.5).setOrigin(0).setDepth(4));
     this.tweens.add({ targets: f, alpha: 0, duration: 180, onComplete: () => f.destroy() });
   }
 
@@ -289,14 +353,11 @@ class GameScene extends Phaser.Scene {
       const [a, b] = k.split('+').map(Number);
       return `${BLOCKS[a].name}  +  ${BLOCKS[b].name}  =  ${BLOCKS[RECIPES[k]].name}`;
     });
-    const bg = this.add.rectangle(400, 225, 560, 320, 0x000000, 0.88).setStrokeStyle(3, 0xffffff, 0.6)
-      .setScrollFactor(0).setDepth(20).setInteractive();
+    const bg = this.uiO(this.add.rectangle(400, 225, 560, 320, 0x000000, 0.88).setStrokeStyle(3, 0xffffff, 0.6).setDepth(40).setInteractive());
     const st = { fontSize: '20px', color: '#fff', align: 'center', lineSpacing: 10 };
-    const title = this.add.text(400, 88, `Buku Resep (${found}/${keys.length})`, { ...st, fontSize: '24px', color: '#ffd54a' })
-      .setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
-    const body = this.add.text(400, 135, lines.join('\n'), st).setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
-    const foot = this.add.text(400, 340, 'Cara: pilih seed, lalu tap pohon lain yang belum matang.\nTap di mana saja untuk menutup.', { ...st, fontSize: '15px', color: '#cfcfcf' })
-      .setOrigin(0.5, 0).setScrollFactor(0).setDepth(21);
+    const title = this.uiO(this.add.text(400, 88, `Buku Resep (${found}/${keys.length})`, { ...st, fontSize: '24px', color: '#ffd54a' }).setOrigin(0.5, 0).setDepth(41));
+    const body = this.uiO(this.add.text(400, 135, lines.join('\n'), st).setOrigin(0.5, 0).setDepth(41));
+    const foot = this.uiO(this.add.text(400, 340, 'Cara: pilih seed, lalu tap pohon lain yang belum matang.\nTap di mana saja untuk menutup.', { ...st, fontSize: '15px', color: '#cfcfcf' }).setOrigin(0.5, 0).setDepth(41));
     bg.on('pointerdown', () => this.toggleBook());
     this.book = [bg, title, body, foot];
   }
@@ -313,6 +374,24 @@ class GameScene extends Phaser.Scene {
     const xs = [p.x, p.x + p.w - 1];
     const ys = [p.y, p.y + p.h / 2, p.y + p.h - 1];
     return xs.some((x) => ys.some((y) => this.solid(x, y)));
+  }
+
+  updatePinch() {
+    const down = this.input.manager.pointers.filter((p) => p.isDown && !p.onUI);
+    const wc = this.cams.world;
+    if (down.length >= 2) {
+      const [a, b] = down;
+      const d = Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
+      a.pinched = b.pinched = true;
+      if (!this.pinch) this.pinch = { d0: Math.max(d, 1), z0: wc.zoom };
+      else {
+        const z = Phaser.Math.Clamp(this.pinch.z0 * d / this.pinch.d0, ZMIN, ZMAX);
+        wc.setZoom(z);
+        this.zoomTxt.setText(`Zoom ${z.toFixed(1)}x`).setAlpha(1);
+        if (this.zoomFade) this.zoomFade.stop();
+        this.zoomFade = this.tweens.add({ targets: this.zoomTxt, alpha: 0, delay: 700, duration: 400 });
+      }
+    } else this.pinch = null;
   }
 
   update(time, delta) {
@@ -337,11 +416,15 @@ class GameScene extends Phaser.Scene {
     this.sprite.setFlipX(this.facing < 0);
     this.sprite.setAngle(p.vx && p.ground ? Math.sin(time * 0.025) * 5 : 0);
 
-    const cam = this.cameras.main;
-    this.hills.y = 24 * T - cam.scrollY - 200;
-    this.hills.tilePositionX = cam.scrollX * 0.25;
-    this.clouds.y = 10 - cam.scrollY * 0.3;
-    this.clouds.tilePositionX = cam.scrollX * 0.1 + time * 0.01;
+    this.updatePinch();
+
+    // latar mengikuti kamera dunia (parallax)
+    const wc = this.cams.world, z = wc.zoom;
+    const mx = wc.midPoint.x, my = wc.midPoint.y;
+    this.hills.y = (24 * T - my) * z + 225 - 200;
+    this.hills.tilePositionX = (mx - 400) * 0.25;
+    this.clouds.y = 10 - (my - 225) * 0.3;
+    this.clouds.tilePositionX = (mx - 400) * 0.1 + time * 0.01;
   }
 }
 
