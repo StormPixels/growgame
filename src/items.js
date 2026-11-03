@@ -1,17 +1,21 @@
 // Daftar semua blok dan seed. Tambah blok baru cukup di sini (+ gambar di textures.js).
 // grow = lama pohon tumbuh (detik, waktu nyata). Tanpa grow = tidak punya seed.
+// file = nama file PNG 32x32 di public/textures (lihat docs/TEXTURE_GUIDE.md).
+// hits = jumlah pukulan untuk menghancurkan blok (bawaan 3).
 export const BLOCKS = {
-  1: { name: 'Tanah', tex: 0, color: '#8b5a2b', grow: 30 },
-  2: { name: 'Batu', tex: 1, color: '#808080', grow: 90 },
-  3: { name: 'Rumput', tex: 2, color: '#4caf50', grow: 45, drop: 1 }, // dihancurkan -> dapat tanah
-  4: { name: 'Dasar', tex: 3, color: '#333333', unbreakable: true },
-  5: { name: 'Pasir', tex: 4, color: '#e3cf8e', grow: 60 },
+  1: { name: 'Tanah', file: 'dirt', tex: 0, color: '#8b5a2b', grow: 30, hits: 3 },
+  2: { name: 'Batu', file: 'stone', tex: 1, color: '#808080', grow: 90, hits: 6 },
+  3: { name: 'Rumput', file: 'grass', tex: 2, color: '#4caf50', grow: 45, drop: 1, hits: 3 }, // dihancurkan -> dapat tanah
+  4: { name: 'Dasar', file: 'bedrock', tex: 3, color: '#333333', unbreakable: true },
+  5: { name: 'Pasir', file: 'sand', tex: 4, color: '#e3cf8e', grow: 60, hits: 2 },
   // blok di bawah ini hanya didapat lewat splicing
-  6: { name: 'Kerikil', tex: 5, color: '#9a9288', grow: 120 },
-  7: { name: 'Kayu', tex: 6, color: '#b5803f', grow: 120 },
-  8: { name: 'Kaca', tex: 7, color: '#bfe9f7', grow: 180 },
-  9: { name: 'Bata', tex: 8, color: '#b5503a', grow: 240 },
+  6: { name: 'Kerikil', file: 'gravel', tex: 5, color: '#9a9288', grow: 120, hits: 4 },
+  7: { name: 'Kayu', file: 'wood', tex: 6, color: '#b5803f', grow: 120, hits: 4 },
+  8: { name: 'Kaca', file: 'glass', tex: 7, color: '#bfe9f7', grow: 180, hits: 2 },
+  9: { name: 'Bata', file: 'brick', tex: 8, color: '#b5503a', grow: 240, hits: 6 },
+  10: { name: 'World Lock', file: 'world_lock', tex: 9, color: '#f2c230', unbreakable: true }, // item khusus: mengunci world
 };
+export const LOCK_ID = 10;
 
 // Resep splicing: seed A + seed B -> seed hasil (urutan bebas). Kunci = "idKecil+idBesar".
 export const recipeKey = (a, b) => (a < b ? `${a}+${b}` : `${b}+${a}`);
